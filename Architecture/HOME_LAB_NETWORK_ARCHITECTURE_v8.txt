@@ -1,6 +1,6 @@
 ═══════════════════════════════════════════════════════════════════
-HOME LAB — NETWORK ARCHITECTURE v14
-Last Updated: May 4, 2026 | VMnet19 Restored | Phase 22 Unblocked
+HOME LAB — NETWORK ARCHITECTURE v15
+Last Updated: May 19, 2026 | Phase 22 Complete | Suricata IDS Deployed
 ═══════════════════════════════════════════════════════════════════
 
 ═══════════════════════════════════════════════════════════════════
@@ -23,6 +23,8 @@ PHYSICAL SETUP
                         Cox Panoramic gateway — wireless client isolation
                         enforced at firmware level, no UI toggle to disable
   Lenovo Laptop:        192.168.0.241 (Wi-Fi, used for SSH access and Wireshark)
+                        Note: Cox AP isolation blocks Lenovo → Dell direct traffic.
+                        Use Dell directly for SSH into lab VMs.
   MacBook M1 Pro:       192.168.0.162 (Kali via UTM — bridged on Wi-Fi)
                         Path to DMZ deprecated as of v14 due to Cox AP isolation
 
@@ -47,6 +49,11 @@ VMWARE VIRTUAL NETWORK ADAPTERS (Dell Host)
   and do not update VM-to-VMnet mappings even when the underlying VMnet is
   removed. Always export Virtual Network Editor config before running Repair.
 
+  Note (v15): ATT-KALI01 and DMZ-VULN01 should each have ONE adapter on
+  VMnet19 only. A second phantom adapter on VMnet10 or VMnet13 causes ARP
+  failures and broken VM-to-VM connectivity. Verify adapter count in VM
+  Settings after any VMware reconfiguration.
+
 ═══════════════════════════════════════════════════════════════════
 NETWORK ZONES
 ═══════════════════════════════════════════════════════════════════
@@ -56,6 +63,7 @@ NETWORK ZONES
   Servers (LAN)   10.10.10.0/24    LAN  / em1          DC, SIEM, DB
   Clients (OPT1)  10.10.20.0/24    OPT1 / em2          Windows 11 client
   DMZ (OPT2)      10.10.30.0/24    OPT2 / em3          Kali + Metasploitable
+                                                        Suricata IDS on em3
 
 ═══════════════════════════════════════════════════════════════════
 VM INVENTORY
@@ -64,15 +72,25 @@ VM INVENTORY
   VM                OS                    IP              Zone
   ──────────────    ──────────────────    ─────────────   ──────────
   SRV-FW01          pfSense 2.7.2         10.10.10.1      Gateway
+                    Suricata 7.0.8 on OPT2/em3 (Phase 22)
   SRV-DC01          Windows Server 2022   10.10.10.133    Servers
   SRV-SIEM01        Ubuntu 24.04 / Wazuh  10.10.10.135    Servers
   SRV-DB01          Ubuntu / MySQL        10.10.10.128    Servers
   CLI-WIN11-01      Windows 11            10.10.20.134    Clients
   ATT-KALI01        Kali Linux            10.10.30.130    DMZ
+                    Single adapter — VMnet19 only
+                    IP set manually at session start (DHCP unreliable):
+                    sudo ip link set eth0 up
+                    sudo ip addr add 10.10.30.130/24 dev eth0
+                    sudo ip route add default via 10.10.30.1 dev eth0
   DMZ-VULN01        Metasploitable 2      10.10.30.101    DMZ
+                    Single adapter — VMnet19 only
+                    RAM: 512 MB
+
+  SRV-FW01 RAM bumped to 2 GB (Phase 22) to support Suricata.
 
 ═══════════════════════════════════════════════════════════════════
-ARCHITECTURAL CONSTRAINTS (v14)
+ARCHITECTURAL CONSTRAINTS (v15)
 ═══════════════════════════════════════════════════════════════════
 
   Host-to-DMZ Isolation (By Design)
@@ -107,6 +125,16 @@ ARCHITECTURAL CONSTRAINTS (v14)
   a profile by NLA at all (host-only nets have no internet connectivity), but
   this does not prevent traffic flow — only the named LAN adapter matters.
 
+  ATT-KALI01 Static IP
+  ─────────────────────
+  ATT-KALI01 eth0 comes up DOWN after reboot. NetworkManager does not
+  reliably bring it up. At the start of each session, run:
+    sudo ip link set eth0 up
+    sudo ip addr add 10.10.30.130/24 dev eth0
+    sudo ip route add default via 10.10.30.1 dev eth0
+  This persists for the session only. A permanent fix via nmcli or
+  /etc/network/interfaces has not been resolved — document as known issue.
+
 ═══════════════════════════════════════════════════════════════════
 VMX FILE PATHS
 ═══════════════════════════════════════════════════════════════════
@@ -128,7 +156,7 @@ SRV-FW01 ADAPTER MAPPING (verify after any VMware reconfiguration)
   1         WAN/em0   VMnet8    NAT to Cox gateway
   2         LAN/em1   VMnet10   Servers zone
   3         OPT1/em2  VMnet11   Clients zone
-  4         OPT2/em3  VMnet19   DMZ zone
+  4         OPT2/em3  VMnet19   DMZ zone — Suricata IDS active
 
   Critical: pfSense identifies interfaces by VMware adapter slot order, not
   by MAC. After VMware Repair installs that delete custom VMnets, the VM
@@ -168,6 +196,9 @@ ROUTING — ATT-KALI01 → DMZ (Canonical Attack Path as of v14)
   OPT2 nets → 10.10.30.101. No host transit, no portproxy, no Cox
   gateway involvement. Validated end-to-end May 4, 2026 (4/4 ping
   replies, sub-ms latency).
+
+  Note: ATT-KALI01 eth0 must be brought up manually each session.
+  See ARCHITECTURAL CONSTRAINTS → ATT-KALI01 Static IP.
 
 ═══════════════════════════════════════════════════════════════════
 ROUTING — MACBOOK KALI → DMZ (Deprecated, Documented for History)
@@ -231,6 +262,39 @@ FIREWALL RULES (pfSense — Phase 10 + Phase 21 additions)
   segmentation. Do not add. See ARCHITECTURAL CONSTRAINTS section.
 
 ═══════════════════════════════════════════════════════════════════
+SURICATA IDS (Phase 22 — pfSense OPT2/em3)
+═══════════════════════════════════════════════════════════════════
+
+  Version:        Suricata 7.0.8 (pfSense Package Manager)
+  Interface:      OPT2 / em3 (DMZ zone)
+  Mode:           IDS only (Blocking Mode: DISABLED)
+  Pattern Match:  AUTO
+
+  Rulesets enabled:
+    ET Open (Emerging Threats) — free ruleset, updated 12-hourly
+    Categories active:
+      emerging-exploit.rules
+      emerging-ftp.rules
+      emerging-scan.rules
+      emerging-shellcode.rules
+      emerging-malware.rules
+      emerging-attack_response.rules
+    Custom rules:
+      custom.rules — SID 9000001:
+        alert tcp any any -> any 6200
+        (msg:"ET EXPLOIT vsftpd 2.3.4 Backdoor Port 6200";
+        flow:to_server; sid:9000001; rev:1; classtype:attempted-admin;)
+
+  Syslog output:
+    Facility:   LOCAL0
+    Priority:   ALERT
+    Destination: SRV-SIEM01 10.10.10.135:514 UDP (reuses Phase 21 pipeline)
+
+  pfSense Global Settings → Remote Logging:
+    Remote log server: 10.10.10.135:514
+    Remote Syslog Contents: System Events + Firewall Events
+
+═══════════════════════════════════════════════════════════════════
 WAZUH AGENT INVENTORY
 ═══════════════════════════════════════════════════════════════════
 
@@ -244,7 +308,7 @@ WAZUH AGENT INVENTORY
   DMZ-VULN01         10.10.30.101    Metasploitable 2    None (Ubuntu 8.04 incompatible)
 
 ═══════════════════════════════════════════════════════════════════
-CUSTOM WAZUH RULES (local_rules.xml on SRV-SIEM01)
+CUSTOM WAZUH RULES (local_rules.xml + suricata_pfsense_rules.xml)
 ═══════════════════════════════════════════════════════════════════
 
   Rule ID   MITRE       Detection
@@ -259,9 +323,17 @@ CUSTOM WAZUH RULES (local_rules.xml on SRV-SIEM01)
   100008    T1053.005   Scheduled task created
   100009    T1059       Bindshell port 1524 detected (level 15)
   100010    T1190       vsftpd backdoor — port 6200 connection (level 12)
+                        pfSense filterlog source
+  100020    T1046       Suricata IDS alert — all priorities (level 6)
+  100021    T1046       Suricata high priority alert — Priority 1 (level 10)
+  100022    T1190       Suricata vsftpd/backdoor/6200 alert (level 12)
 
-  Decoder:  pfSense filterlog parent decoder in local_decoder.xml
-            Prematch on "filterlog" — rule-level dstport matching
+  Decoders:
+    local_decoder.xml   — pfSense filterlog parent decoder
+    suricata_pfsense.xml — Suricata syslog format decoder
+      /var/ossec/etc/decoders/suricata_pfsense.xml
+      Prematch: "suricata["
+      Parent captures full description field
 
 ═══════════════════════════════════════════════════════════════════
 SYSLOG PIPELINE (pfSense → Wazuh)
@@ -269,12 +341,13 @@ SYSLOG PIPELINE (pfSense → Wazuh)
 
   Source:     SRV-FW01 (10.10.10.1)
   Target:     SRV-SIEM01 (10.10.10.135) UDP 514
-  Content:    Firewall events (filterlog format)
+  Content:    Firewall events (filterlog) + Suricata alerts (LOCAL0)
+              System events, nginx access logs
 
   pfSense config:
     Status → System Logs → Settings → Remote Logging
     Remote log server: 10.10.10.135:514
-    Remote Syslog Contents: Firewall Events only
+    Remote Syslog Contents: System Events + Firewall Events
 
   pfSense firewall rule (LAN):
     Allow UDP 10.10.10.1 → 10.10.10.135:514 (pfSense syslog to Wazuh)
@@ -305,12 +378,17 @@ ATTACK EXERCISES COMPLETED
   19      T1190       vsftpd exploit — pcap captured      SUCCESS
   19      T1059       Backdoor shell — Wireshark analyzed SUCCESS
   21      T1190       Rule 100010 fires on port 6200      VALIDATED
-                      (synthetic filterlog injection —
-                      live exploit re-test pending)
+                      (synthetic filterlog injection)
+  22      T1046       Nmap scan — ET SCAN Suricata alert  VALIDATED
+                      Rule 100020 fires in Wazuh
+  22      T1190       vsftpd 2.3.4 exploit — SID 9000001  VALIDATED
+                      Suricata + Wazuh rule 100020 fire
+                      Root shell confirmed uid=0(root)
+                      IR-2026-004 written
 
   Note: Phases 17–19 originally executed from MacBook Kali through Dell
   portproxy/direct routing. As of v14, this attack source is deprecated.
-  Phase 22+ exploitation testing will originate from ATT-KALI01.
+  Phase 22+ exploitation testing originates from ATT-KALI01.
 
 ═══════════════════════════════════════════════════════════════════
 PACKET CAPTURE
@@ -348,12 +426,6 @@ LAB SCRIPTS (Dell — D:\Lab-Documentation\Scripts\)
 SSH ACCESS QUICK REFERENCE
 ═══════════════════════════════════════════════════════════════════
 
-  From Lenovo/iPad → Dell:
-    ssh sshuser@192.168.0.150
-    Password: Termius2025Attack!
-    Note: PasswordAuthentication enabled in sshd_config
-    Note: Lenovo and Dell must both have NetworkCategory: Private
-
   From Dell → SIEM01:
     ssh siemadmin@10.10.10.135
     Password: SIEM2025Lab!
@@ -367,15 +439,19 @@ SSH ACCESS QUICK REFERENCE
         msfadmin@10.10.30.101:/path C:\dest\
     Password: msfadmin
 
+  Note: Lenovo → Dell SSH is blocked by Cox AP isolation. Use Dell directly.
+
 ═══════════════════════════════════════════════════════════════════
 GITHUB REPOSITORY
 ═══════════════════════════════════════════════════════════════════
 
   Repo:       enterprise-security-home-lab/IT-analyst-home-lab
   Local:      D:\Lab-Documentation
-  Branch:     master
+  Branch:     main
   Last push:  May 4, 2026 — VMnet19 recovery, v21 master summary, v14 architecture
+  Pending:    Phase 22 — Suricata IDS, IR-2026-004, v22 master summary, v15 architecture
 
 ═══════════════════════════════════════════════════════════════════
-HOME LAB NETWORK ARCHITECTURE v14 | Last Updated: May 4, 2026
+HOME LAB NETWORK ARCHITECTURE v15 | Last Updated: May 19, 2026
+Phase 22 Complete | Suricata IDS Deployed on OPT2/em3
 ═══════════════════════════════════════════════════════════════════
